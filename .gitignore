@@ -1,0 +1,29 @@
+# 打包产物
+build/
+dist/
+*.exe
+
+# 运行时日志
+*.log
+
+# 第三方二进制依赖(README 里给下载链接)
+LibreHardwareMonitor/*.dll
+LibreHardwareMonitor/*.exe
+LibreHardwareMonitor/*.pdb
+LibreHardwareMonitor/*.config
+LibreHardwareMonitor/de/
+LibreHardwareMonitor/es/
+LibreHardwareMonitor/fr/
+LibreHardwareMonitor/it/
+LibreHardwareMonitor/ja/
+LibreHardwareMonitor/zh-*/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 系统
+Thumbs.db
+.DS_Store
