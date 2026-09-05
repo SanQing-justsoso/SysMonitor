@@ -61,7 +61,7 @@ else:
 
 LHM_EXE = os.path.join(LHM_DIR, "lhm_dump.exe")
 
-REFRESH_MS = 1000          # 刷新间隔（毫秒）
+REFRESH_MS = 200           # 刷新间隔（毫秒）- 快速恢复防止被遮挡
 CPU_TEMP_EVERY = 4         # CPU 温度每隔 N 个 tick 读一次
 
 BG = "#e8e8f0"             # 贴片背景色（浅色）
@@ -434,7 +434,7 @@ def overlay_geometry(tbr, nr, requested_width, requested_height):
     taskbar_height = tbr.bottom - tbr.top
     if taskbar_width >= taskbar_height:
         available_width = nr.left - tbr.left - 2 * LEFT_MARGIN
-        width = max(16, min(requested_width, available_width))
+        width = requested_width  # 不限制宽度，让窗口完整显示
         height = max(16, taskbar_height - 2 * VPAD)
         x = tbr.left + LEFT_MARGIN
         y = tbr.top + VPAD
@@ -840,11 +840,6 @@ def run_gui():
     import pystray
     from PIL import Image, ImageDraw
 
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except Exception:
-        pass
-
     log("startup: frozen=%s LHM_EXE=%s exists=%s PM_EXE=%s exists=%s" % (
         FROZEN, LHM_EXE, os.path.exists(LHM_EXE), PM_EXE, os.path.exists(PM_EXE)))
 
@@ -985,7 +980,6 @@ def run_gui():
                     x, y, final_w, final_h = overlay_geometry(tbr, nr, w, h)
                     user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, final_w, final_h,
                                         SWP_NOACTIVATE | SWP_SHOWWINDOW)
-                    # 确保窗口始终可见（防止被任务栏遮挡）
                     user32.ShowWindow(hwnd, SW_SHOW)
         except Exception as e:
             log("positioning failed:", e)
@@ -1026,6 +1020,13 @@ def run_gui():
 
 
 def main():
+    # 尽早设置 DPI 感知，避免窗口尺寸被缩放
+    # 用 SetProcessDPIAware（系统 DPI aware），比 per-monitor 更兼容 Tk
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
     if "--selftest" in sys.argv:
         try:
             selftest()

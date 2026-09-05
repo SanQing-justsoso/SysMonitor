@@ -75,7 +75,7 @@ class LayoutTests(unittest.TestCase):
         taskbar = monitor.rect(0, 1000, 500, 1040)
         notify = monitor.rect(450, 1000, 500, 1040)
         x, y, width, height = monitor.overlay_geometry(taskbar, notify, 500, 20)
-        self.assertEqual((x, y, width, height), (8, 1003, 434, 34))
+        self.assertEqual((x, y, width, height), (8, 1003, 500, 34))
 
 
 if __name__ == "__main__":
