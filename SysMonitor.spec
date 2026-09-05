@@ -3,7 +3,7 @@
 import os
 
 
-SPEC_DIR = os.path.dirname(os.path.abspath(__file__))
+SPEC_DIR = os.path.abspath(SPECPATH)
 datas = [(os.path.join(SPEC_DIR, 'LibreHardwareMonitor'), 'LibreHardwareMonitor')]
 _presentmon = os.path.join(SPEC_DIR, 'PresentMon.exe')
 if os.path.exists(_presentmon):
