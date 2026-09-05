@@ -611,6 +611,16 @@ class DashboardRenderer:
         bb = draw.textbbox((0, 0), text, font=font)
         return bb[2] - bb[0], bb[3] - bb[1]
 
+    def _safe_rect(self, x0, y0, x1, y1):
+        """确保 x1>=x0 且 y1>=y0，否则 log 并返回修正值"""
+        if x1 < x0 or y1 < y0:
+            log("SAFE_RECT 修正: x0=%s y0=%s x1=%s y1=%s" % (x0, y0, x1, y1))
+        if x1 < x0:
+            x1 = x0 + 1
+        if y1 < y0:
+            y1 = y0 + 1
+        return x0, y0, x1, y1
+
     def render(
         self,
         cpu_pct: float,
@@ -623,14 +633,20 @@ class DashboardRenderer:
         net_up: float,
         fps: Optional[int] = None,
         target_height: int = 34,
+        scale: float = 1.0,
+        show_cpu: bool = True,
+        show_gpu: bool = True,
+        show_ram: bool = True,
+        show_net: bool = True,
     ) -> Tuple[Image.Image, int, int]:
-        target_height = max(26, min(target_height, 48))
+        target_height = max(26, min(target_height, 200))
+        s = scale
 
-        font_label = self.get_font("segoeuib.ttf", 10)
-        font_val_bold = self.get_font("segoeuib.ttf", 10)
-        font_val_reg = self.get_font("segoeui.ttf", 10)
-        font_sub = self.get_font("segoeui.ttf", 9)
-        font_arrow = self.get_font("segoeuib.ttf", 11)
+        font_label = self.get_font("segoeuib.ttf", int(10 * s))
+        font_val_bold = self.get_font("segoeuib.ttf", int(10 * s))
+        font_val_reg = self.get_font("segoeui.ttf", int(10 * s))
+        font_sub = self.get_font("segoeui.ttf", int(9 * s))
+        font_arrow = self.get_font("segoeuib.ttf", int(11 * s))
 
         dummy_img = Image.new("RGBA", (1, 1))
         d = ImageDraw.Draw(dummy_img)
@@ -658,83 +674,91 @@ class DashboardRenderer:
 
         # 1. 计算 CPU 宽度（Row 1: CPU + 数值 + 温度; Row 2: 饱满进度条）
         cpu_r1_w = (
-            self.measure(d, "CPU", font_label)[0] + 6
-            + self.measure(d, cpu_val_str, font_val_bold)[0] + 6
+            self.measure(d, "CPU", font_label)[0] + int(6 * s)
+            + self.measure(d, cpu_val_str, font_val_bold)[0] + int(6 * s)
             + self.measure(d, cpu_temp_str, font_sub)[0]
         )
-        cpu_w = max(cpu_r1_w, 68)
+        cpu_w = max(cpu_r1_w, int(68 * s))
 
         # 2. 计算 GPU 宽度（即使未检测到也完整展示占位，不隐藏）
         gpu_r1_w = (
-            self.measure(d, "GPU", font_label)[0] + 6
-            + self.measure(d, gpu_val_str, font_val_bold)[0] + 6
+            self.measure(d, "GPU", font_label)[0] + int(6 * s)
+            + self.measure(d, gpu_val_str, font_val_bold)[0] + int(6 * s)
             + self.measure(d, gpu_temp_str, font_sub)[0]
         )
-        gpu_r2_w = 44 + 6 + self.measure(d, vram_str, font_sub)[0]
-        gpu_w = max(gpu_r1_w, gpu_r2_w, 76)
+        gpu_r2_w = int(44 * s) + int(6 * s) + self.measure(d, vram_str, font_sub)[0]
+        gpu_w = max(gpu_r1_w, gpu_r2_w, int(76 * s))
 
         # 3. 计算 RAM 宽度（Row 1: RAM + 百分比; Row 2: 进度条 + 内存具体使用量，舒展不挤占）
         ram_r1_w = (
-            self.measure(d, "RAM", font_label)[0] + 6
+            self.measure(d, "RAM", font_label)[0] + int(6 * s)
             + self.measure(d, ram_val_str, font_val_bold)[0]
         )
-        ram_r2_w = 44 + 6 + self.measure(d, ram_mem_str, font_sub)[0]
-        ram_w = max(ram_r1_w, ram_r2_w, 88)
+        ram_r2_w = int(44 * s) + int(6 * s) + self.measure(d, ram_mem_str, font_sub)[0]
+        ram_w = max(ram_r1_w, ram_r2_w, int(88 * s))
 
         # 4. 计算 网速 宽度
         net_r1_w = self.measure(d, "↓ ", font_arrow)[0] + self.measure(d, down_str, font_val_reg)[0]
         net_r2_w = self.measure(d, "↑ ", font_arrow)[0] + self.measure(d, up_str, font_val_reg)[0]
-        net_w = max(net_r1_w, net_r2_w, 76)
+        net_w = max(net_r1_w, net_r2_w, int(76 * s))
 
         # 5. 计算 FPS 宽度（若有）
         fps_w = 0
         if fps is not None:
             fps_r1_w = self.measure(d, "FPS", font_label)[0]
             fps_r2_w = self.measure(d, str(fps), font_val_bold)[0]
-            fps_w = max(fps_r1_w, fps_r2_w, 28)
+            fps_w = max(fps_r1_w, fps_r2_w, int(28 * s))
 
-        sections = [
-            ("cpu", cpu_w),
-            ("gpu", gpu_w),
-            ("ram", ram_w),
-            ("net", net_w),
-        ]
+        sections = []
+        if show_cpu:
+            sections.append(("cpu", cpu_w))
+        if show_gpu:
+            sections.append(("gpu", gpu_w))
+        if show_ram:
+            sections.append(("ram", ram_w))
+        if show_net:
+            sections.append(("net", net_w))
         if fps is not None:
             sections.append(("fps", fps_w))
 
-        pad_x = 12
-        spacing = 18
+        pad_x = int(12 * s)
+        spacing = int(18 * s)
         total_w = pad_x * 2 + sum(w for _, w in sections) + spacing * (len(sections) - 1)
+        if total_w <= 0 or any(w <= 0 for _, w in sections):
+            log("RENDER WARNING: s=%.2f total_w=%d sections=%s" % (
+                s, total_w, [(t, int(w)) for t, w in sections]))
 
         img = Image.new("RGBA", (total_w, target_height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
         # 绘制浅色半透明圆角底板与细边框
         draw.rounded_rectangle(
-            [0, 0, total_w - 1, target_height - 1],
+            self._safe_rect(0, 0, total_w - 1, target_height - 1),
             radius=7,
             fill=self.bg_color,
             outline=self.border_color,
             width=1,
         )
 
-        y1 = 2 if target_height <= 36 else 3
-        y2 = 18 if target_height <= 36 else 20
-        bar_h = 4
-        bar_y = y2 + 3
+        # 布局参数随高度缩放
+        ratio = target_height / 42.0
+        y1 = max(1, int(3 * ratio))
+        y2 = max(9, int(20 * ratio))
+        bar_h = max(2, int(4 * ratio))
+        bar_y = y2 + max(1, int(3 * ratio))
 
         cur_x = pad_x
         for idx, (sec_type, sec_w) in enumerate(sections):
             if idx > 0:
                 div_x = cur_x - spacing // 2
-                draw.line([(div_x, 5), (div_x, target_height - 5)], fill=self.divider_color, width=1)
+                draw.line([(div_x, y1), (div_x, target_height - y1)], fill=self.divider_color, width=1)
 
             if sec_type == "cpu":
                 x = cur_x
                 draw.text((x, y1), "CPU", fill=self.fg_label, font=font_label)
-                x += self.measure(d, "CPU", font_label)[0] + 6
+                x += self.measure(d, "CPU", font_label)[0] + int(6 * s)
                 draw.text((x, y1), cpu_val_str, fill=self.fg_primary, font=font_val_bold)
-                x += self.measure(d, cpu_val_str, font_val_bold)[0] + 6
+                x += self.measure(d, cpu_val_str, font_val_bold)[0] + int(6 * s)
                 temp_color = self.alert_color if (cpu_temp and cpu_temp >= 85) else (
                     self.warning_color if (cpu_temp and cpu_temp >= 75) else self.fg_muted
                 )
@@ -742,11 +766,11 @@ class DashboardRenderer:
 
                 # CPU 进度条
                 bx, by, bw, bh = cur_x, bar_y, sec_w, bar_h
-                draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=2, fill=self.bar_track_color)
-                fill_w = max(2, int(bw * (min(100.0, max(0.0, cpu_pct)) / 100.0))) if cpu_pct > 0 else 0
+                draw.rounded_rectangle(self._safe_rect(bx, by, bx + bw, by + bh), radius=2, fill=self.bar_track_color)
+                fill_w = int(min(bw, max(2, int(bw * (min(100.0, max(0.0, cpu_pct)) / 100.0))))) if cpu_pct > 0 else 0
                 if fill_w > 0:
                     draw.rounded_rectangle(
-                        [bx, by, bx + fill_w, by + bh],
+                        self._safe_rect(bx, by, bx + fill_w, by + bh),
                         radius=2,
                         fill=self.get_metric_color(cpu_pct, self.cpu_normal_color),
                     )
@@ -754,10 +778,10 @@ class DashboardRenderer:
             elif sec_type == "gpu":
                 x = cur_x
                 draw.text((x, y1), "GPU", fill=self.fg_label, font=font_label)
-                x += self.measure(d, "GPU", font_label)[0] + 6
+                x += self.measure(d, "GPU", font_label)[0] + int(6 * s)
                 gpu_color = self.fg_primary if gpu_data else "#8c92a4"
                 draw.text((x, y1), gpu_val_str, fill=gpu_color, font=font_val_bold)
-                x += self.measure(d, gpu_val_str, font_val_bold)[0] + 6
+                x += self.measure(d, gpu_val_str, font_val_bold)[0] + int(6 * s)
                 gpu_temp_color = (
                     self.alert_color if (gpu_data and gpu_data["temp"] >= 85) else (
                         self.warning_color if (gpu_data and gpu_data["temp"] >= 75) else (
@@ -768,36 +792,36 @@ class DashboardRenderer:
                 draw.text((x, y1 + 1), gpu_temp_str, fill=gpu_temp_color, font=font_sub)
 
                 # GPU 进度条 + 显存信息
-                bx, by, bw, bh = cur_x, bar_y, 44, bar_h
-                draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=2, fill=self.bar_track_color)
-                fill_w = max(2, int(bw * (min(100.0, max(0.0, gpu_pct_val)) / 100.0))) if gpu_pct_val > 0 else 0
+                bx, by, bw, bh = cur_x, bar_y, max(2, int(44 * s)), bar_h
+                draw.rounded_rectangle(self._safe_rect(bx, by, bx + bw, by + bh), radius=2, fill=self.bar_track_color)
+                fill_w = int(min(bw, max(2, int(bw * (min(100.0, max(0.0, gpu_pct_val)) / 100.0))))) if gpu_pct_val > 0 else 0
                 if fill_w > 0:
                     draw.rounded_rectangle(
-                        [bx, by, bx + fill_w, by + bh],
+                        self._safe_rect(bx, by, bx + fill_w, by + bh),
                         radius=2,
-                        fill=self.get_metric_color(gpu_data["util"], self.gpu_normal_color),
+                        fill=self.get_metric_color(gpu_pct_val, self.gpu_normal_color),
                     )
-                tx = bx + bw + 6
+                tx = bx + bw + int(6 * s)
                 vram_color = self.fg_muted if gpu_data else "#8c92a4"
                 draw.text((tx, y2), vram_str, fill=vram_color, font=font_sub)
 
             elif sec_type == "ram":
                 x = cur_x
                 draw.text((x, y1), "RAM", fill=self.fg_label, font=font_label)
-                x += self.measure(d, "RAM", font_label)[0] + 6
+                x += self.measure(d, "RAM", font_label)[0] + int(6 * s)
                 draw.text((x, y1), ram_val_str, fill=self.fg_primary, font=font_val_bold)
 
                 # RAM 进度条 + 内存使用详情（并排舒展显示）
-                bx, by, bw, bh = cur_x, bar_y, 44, bar_h
-                draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=2, fill=self.bar_track_color)
-                fill_w = max(2, int(bw * (min(100.0, max(0.0, ram_pct)) / 100.0))) if ram_pct > 0 else 0
+                bx, by, bw, bh = cur_x, bar_y, max(2, int(44 * s)), bar_h
+                draw.rounded_rectangle(self._safe_rect(bx, by, bx + bw, by + bh), radius=2, fill=self.bar_track_color)
+                fill_w = int(min(bw, max(2, int(bw * (min(100.0, max(0.0, ram_pct)) / 100.0))))) if ram_pct > 0 else 0
                 if fill_w > 0:
                     draw.rounded_rectangle(
-                        [bx, by, bx + fill_w, by + bh],
+                        self._safe_rect(bx, by, bx + fill_w, by + bh),
                         radius=2,
                         fill=self.get_metric_color(ram_pct, self.ram_normal_color),
                     )
-                tx = bx + bw + 6
+                tx = bx + bw + int(6 * s)
                 draw.text((tx, y2), ram_mem_str, fill="#555a6a", font=font_sub)
 
             elif sec_type == "net":
@@ -839,6 +863,37 @@ def run_gui():
     import pystray
     from PIL import Image, ImageDraw
 
+    # ---- 配置加载 ----
+    CONFIG_FILE = os.path.join(BASE_DIR, "monitor_config.json")
+    DEFAULT_CONFIG = {
+        "scale": 1.5,
+        "locked": True,
+        "x": 0, "y": 0,
+        "show_cpu": True,
+        "show_gpu": True,
+        "show_ram": True,
+        "show_net": True,
+    }
+
+    def load_config():
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                return {**DEFAULT_CONFIG, **cfg}
+        except Exception:
+            pass
+        return dict(DEFAULT_CONFIG)
+
+    def save_config(cfg):
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception as e:
+            log("save config failed:", e)
+
+    config = load_config()
+
     log("startup: frozen=%s LHM_EXE=%s exists=%s PM_EXE=%s exists=%s" % (
         FROZEN, LHM_EXE, os.path.exists(LHM_EXE), PM_EXE, os.path.exists(PM_EXE)))
 
@@ -854,6 +909,14 @@ def run_gui():
         "net_down": 0.0,
         "net_up": 0.0,
         "manual_hidden": False,
+        "show_cpu": config["show_cpu"],
+        "show_gpu": config["show_gpu"],
+        "show_ram": config["show_ram"],
+        "show_net": config["show_net"],
+        "scale": float(config["scale"]),
+        "locked": bool(config["locked"]),
+        "drag_x": 0, "drag_y": 0,  # 拖动起始偏移
+        "wx": config["x"], "wy": config["y"],  # 窗口位置
     }
 
     cmd_q = queue.Queue()
@@ -861,17 +924,46 @@ def run_gui():
 
     # ---- 贴片窗口 ----
     root = tk.Tk()
+    root.tk.call('tk', 'scaling', 1.0)  # 强制物理像素 1:1，避免 DPI 缩放
     root.overrideredirect(True)
     root.attributes("-topmost", True)
     root.attributes("-alpha", 0.92)
     root.configure(bg=BG)
 
     label = tk.Label(root, bg=BG, bd=0, highlightthickness=0)
-    label.pack()  # 不 expand，窗口尺寸由 SetWindowPos 控制
+    label.place(x=0, y=0, relwidth=1, relheight=1)  # 充满窗口，尺寸由 SetWindowPos 控制
+
+    # ---- 窗口拖动 ----
+    def on_drag_start(event):
+        state["drag_x"] = event.x
+        state["drag_y"] = event.y
+
+    def on_drag_move(event):
+        if state["locked"]:
+            return
+        dx = event.x - state["drag_x"]
+        dy = event.y - state["drag_y"]
+        state["wx"] = root.winfo_x() + dx
+        state["wy"] = root.winfo_y() + dy
+        config["x"] = state["wx"]
+        config["y"] = state["wy"]
+        save_config(config)
+        root.geometry("+%d+%d" % (state["wx"], state["wy"]))
+
+    label.bind("<Button-1>", on_drag_start)
+    label.bind("<B1-Motion>", on_drag_move)
 
     root.update_idletasks()
     hwnd = get_toplevel_hwnd(root.winfo_id())
-    # 浮窗模式：不设置点击穿透，保留 WS_EX_TOPMOST
+
+    # 锁定模式：设置点击穿透
+    if state["locked"]:
+        ex = _GetWindowLongPtr(hwnd, GWL_EXSTYLE)
+        _SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT)
+    else:
+        # 解锁模式：恢复用户保存的位置
+        if state["wx"] != 0 or state["wy"] != 0:
+            root.geometry("+%d+%d" % (state["wx"], state["wy"]))
 
     # ---- 托盘图标（退出/显示隐藏入口，因为贴片本身点击穿透）----
     def make_icon_img():
@@ -897,8 +989,70 @@ def run_gui():
     def on_toggle(icon, item):
         request_toggle()
 
+    def on_show_cpu(icon, item):
+        state["show_cpu"] = not state["show_cpu"]
+        config["show_cpu"] = state["show_cpu"]
+        save_config(config)
+
+    def on_show_gpu(icon, item):
+        state["show_gpu"] = not state["show_gpu"]
+        config["show_gpu"] = state["show_gpu"]
+        save_config(config)
+
+    def on_show_ram(icon, item):
+        state["show_ram"] = not state["show_ram"]
+        config["show_ram"] = state["show_ram"]
+        save_config(config)
+
+    def on_show_net(icon, item):
+        state["show_net"] = not state["show_net"]
+        config["show_net"] = state["show_net"]
+        save_config(config)
+
+    def on_zoom_in(icon, item):
+        s = state["scale"] + 0.25
+        if s <= 3.0:
+            state["scale"] = s
+            config["scale"] = s
+            save_config(config)
+
+    def on_zoom_out(icon, item):
+        s = state["scale"] - 0.25
+        if s >= 0.5:
+            state["scale"] = s
+            config["scale"] = s
+            save_config(config)
+
+    def on_lock_toggle(icon, item):
+        cmd_q.put("lock_toggle")
+
+    def on_show_cpu_checked(item):
+        return state["show_cpu"]
+    def on_show_gpu_checked(item):
+        return state["show_gpu"]
+    def on_show_ram_checked(item):
+        return state["show_ram"]
+    def on_show_net_checked(item):
+        return state["show_net"]
+    def on_lock_checked(item):
+        return state["locked"]
+
     menu = pystray.Menu(
         pystray.MenuItem("显示 / 隐藏", on_toggle, default=True),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("显示板块", pystray.Menu(
+            pystray.MenuItem("CPU", on_show_cpu, checked=on_show_cpu_checked),
+            pystray.MenuItem("GPU", on_show_gpu, checked=on_show_gpu_checked),
+            pystray.MenuItem("RAM", on_show_ram, checked=on_show_ram_checked),
+            pystray.MenuItem("网速", on_show_net, checked=on_show_net_checked),
+        )),
+        pystray.MenuItem("大小", pystray.Menu(
+            pystray.MenuItem("放大", on_zoom_in),
+            pystray.MenuItem("缩小", on_zoom_out),
+        )),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("锁定位置", on_lock_toggle, checked=on_lock_checked),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem("退出", on_quit),
     )
     tray_icon = pystray.Icon("sysmon", make_icon_img(), "系统监控", menu)
@@ -938,13 +1092,14 @@ def run_gui():
             cpu_temp_reader.request()
         cpu_temp = cpu_temp_reader.get()
 
-        # 浮窗模式：固定渲染高度
-        target_h = 42
+        # 浮窗模式：渲染高度随 scale 缩放
+        target_h = int(42 * state["scale"])
 
         fps = fps_reader.get() if fps_reader else None
 
         # 渲染双行紧凑彩色仪表板
-        img, w, h = renderer.render(
+        try:
+            img, w, h = renderer.render(
             cpu_pct=cpu_pct,
             cpu_temp=cpu_temp,
             gpu_data=g,
@@ -955,21 +1110,40 @@ def run_gui():
             net_up=state["net_up"],
             fps=fps,
             target_height=target_h,
+            scale=state["scale"],
+            show_cpu=state["show_cpu"],
+            show_gpu=state["show_gpu"],
+            show_ram=state["show_ram"],
+            show_net=state["show_net"],
         )
-        photo = ImageTk.PhotoImage(img)
-        label.config(image=photo)
-        label.image = photo
-        root.update_idletasks()
+            photo = ImageTk.PhotoImage(img)
+            label.config(image=photo)
+            label.image = photo
+            root.update_idletasks()
+        except Exception as e:
+            log("render failed:", e)
 
-        # 浮窗定位：屏幕右下角
+        # 浮窗定位
         try:
-            sw = user32.GetSystemMetrics(0)  # 屏幕宽度
-            sh = user32.GetSystemMetrics(1)  # 屏幕高度
-            x = sw - w - 20  # 右下角，留 20px 边距
-            y = sh - h - 80  # 任务栏上方约 80px
-            user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
-                                SWP_NOACTIVATE | SWP_SHOWWINDOW)
-            root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+            if 'w' not in dir() and 'h' not in dir():
+                root.after(REFRESH_MS, refresh)
+                return
+            if state["locked"]:
+                sw = user32.GetSystemMetrics(0)
+                sh = user32.GetSystemMetrics(1)
+                x = sw - w - 20
+                y = sh - h - 80
+                user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
+                                    SWP_NOACTIVATE | SWP_SHOWWINDOW)
+            else:
+                # 解锁模式：用上次保存的位置，首次用右下角
+                if state["wx"] == 0 and state["wy"] == 0:
+                    sw = user32.GetSystemMetrics(0)
+                    sh = user32.GetSystemMetrics(1)
+                    state["wx"] = sw - w - 20
+                    state["wy"] = sh - h - 80
+                user32.SetWindowPos(hwnd, HWND_TOPMOST, state["wx"], state["wy"], w, h,
+                                    SWP_NOACTIVATE | SWP_SHOWWINDOW)
         except Exception as e:
             log("positioning failed:", e)
 
@@ -988,6 +1162,20 @@ def run_gui():
                     state["manual_hidden"] = not state["manual_hidden"]
                     if state["manual_hidden"]:
                         user32.ShowWindow(hwnd, SW_HIDE)
+                elif c == "lock_toggle":
+                    state["locked"] = not state["locked"]
+                    config["locked"] = state["locked"]
+                    save_config(config)
+                    if state["locked"]:
+                        # 锁定：加点击穿透 + 粘右下角
+                        ex = _GetWindowLongPtr(hwnd, GWL_EXSTYLE)
+                        _SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT)
+                        # 强制回到右下角
+                        user32.ShowWindow(hwnd, SWP_SHOWWINDOW)
+                    else:
+                        # 解锁：去掉点击穿透，可拖动
+                        ex = _GetWindowLongPtr(hwnd, GWL_EXSTYLE)
+                        _SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
         except queue.Empty:
             pass
         root.after(120, poll_cmd)
