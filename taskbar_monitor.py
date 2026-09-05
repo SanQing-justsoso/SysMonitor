@@ -28,10 +28,12 @@ import queue
 import ctypes
 import subprocess
 import traceback
+from pathlib import Path
 from ctypes import wintypes
-from typing import Callable, Optional, Sequence, Tuple
+from typing import Callable, Optional, Sequence, Tuple, Dict, Any
 
 import psutil
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 # ---------------------------------------------------------------------------
 # 路径与显示参数
@@ -532,6 +534,303 @@ def taskbar_visible(tbr):
     return (ix1 - ix0 > 50) and (iy1 - iy0 > 20)
 
 
+class DashboardRenderer:
+    """
+    双行轻量仪表盘渲染器（基于 Pillow 内存画布）。
+    特性：
+    - 浅色半透明圆角卡片质感
+    - 双行紧凑布局（CPU、GPU、RAM、网速、可选 FPS）
+    - 随负载动态变色的彩色微型进度条（低负载科技蓝/翡翠绿/紫色，高负载橙/红警示）
+    - 垂直细分割线、抗锯齿字体对齐
+    """
+
+    def __init__(
+        self,
+        bg_color: str = BG,
+        border_color: str = "#d0d2de",
+        divider_color: str = "#d5d7e4",
+        fg_primary: str = "#16161c",
+        fg_label: str = "#505565",
+        fg_muted: str = "#6b7280",
+    ) -> None:
+        self.bg_color = bg_color
+        self.border_color = border_color
+        self.divider_color = divider_color
+        self.fg_primary = fg_primary
+        self.fg_label = fg_label
+        self.fg_muted = fg_muted
+
+        self.bar_track_color = "#d2d5e2"
+        self.cpu_normal_color = "#0284c7"  # 天蓝
+        self.gpu_normal_color = "#059669"  # 翡翠绿
+        self.ram_normal_color = "#7c3aed"  # 优雅紫
+        self.warning_color = "#ea580c"     # 警示橙
+        self.alert_color = "#dc2626"       # 告警红
+        self.net_down_color = "#0284c7"    # 醒目蓝
+        self.net_up_color = "#059669"      # 翠绿
+        self.fps_color = "#e11d48"         # 玫瑰红
+
+        self._fonts_cache: Dict[Tuple[str, int], Any] = {}
+
+    def get_font(self, name: str, size: int):
+        key = (name, size)
+        if key in self._fonts_cache:
+            return self._fonts_cache[key]
+
+        fonts_dir = Path(os.environ.get("WINDIR", "C:\\Windows")) / "Fonts"
+        is_bold = "b" in name.lower()
+        candidates = [
+            str(fonts_dir / name),
+            name,
+            str(fonts_dir / ("segoeuib.ttf" if is_bold else "segoeui.ttf")),
+            str(fonts_dir / ("arialbd.ttf" if is_bold else "arial.ttf")),
+            "segoeuib.ttf" if is_bold else "segoeui.ttf",
+            "arial.ttf",
+        ]
+        font = None
+        for c in candidates:
+            try:
+                font = ImageFont.truetype(c, size)
+                break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+
+        self._fonts_cache[key] = font
+        return font
+
+    def get_metric_color(self, pct: float, default_color: str = "#0284c7") -> str:
+        if pct >= 85.0:
+            return self.alert_color
+        elif pct >= 70.0:
+            return self.warning_color
+        return default_color
+
+    def measure(self, draw: ImageDraw.ImageDraw, text: str, font) -> Tuple[int, int]:
+        bb = draw.textbbox((0, 0), text, font=font)
+        return bb[2] - bb[0], bb[3] - bb[1]
+
+    def render(
+        self,
+        cpu_pct: float,
+        cpu_temp: Optional[float],
+        gpu_data: Optional[dict],
+        ram_pct: float,
+        ram_used_bytes: float,
+        ram_total_bytes: float,
+        net_down: float,
+        net_up: float,
+        fps: Optional[int] = None,
+        target_height: int = 34,
+    ) -> Tuple[Image.Image, int, int]:
+        target_height = max(26, min(target_height, 48))
+
+        font_label = self.get_font("segoeuib.ttf", 10)
+        font_val_bold = self.get_font("segoeuib.ttf", 10)
+        font_val_reg = self.get_font("segoeui.ttf", 10)
+        font_sub = self.get_font("segoeui.ttf", 9)
+        font_arrow = self.get_font("segoeuib.ttf", 11)
+
+        dummy_img = Image.new("RGBA", (1, 1))
+        d = ImageDraw.Draw(dummy_img)
+
+        # 格式化各字段数据
+        cpu_val_str = "%2.0f%%" % cpu_pct
+        cpu_temp_str = "--" if cpu_temp is None else "%.0f°" % cpu_temp
+
+        if gpu_data:
+            gpu_val_str = "%2d%%" % gpu_data["util"]
+            gpu_temp_str = "%d°" % gpu_data["temp"]
+            vram_str = "%s / %s" % (fmt_gb(gpu_data["vram_used"]), fmt_gb(gpu_data["vram_total"]))
+            gpu_pct_val = float(gpu_data["util"])
+        else:
+            gpu_val_str = "--"
+            gpu_temp_str = "--"
+            vram_str = "-- / --"
+            gpu_pct_val = 0.0
+
+        ram_val_str = "%2.0f%%" % ram_pct
+        ram_mem_str = "%s / %s" % (fmt_gb(ram_used_bytes), fmt_gb(ram_total_bytes))
+
+        down_str = self.fmt_speed_clean(net_down)
+        up_str = self.fmt_speed_clean(net_up)
+
+        # 1. 计算 CPU 宽度（Row 1: CPU + 数值 + 温度; Row 2: 饱满进度条）
+        cpu_r1_w = (
+            self.measure(d, "CPU", font_label)[0] + 6
+            + self.measure(d, cpu_val_str, font_val_bold)[0] + 6
+            + self.measure(d, cpu_temp_str, font_sub)[0]
+        )
+        cpu_w = max(cpu_r1_w, 68)
+
+        # 2. 计算 GPU 宽度（即使未检测到也完整展示占位，不隐藏）
+        gpu_r1_w = (
+            self.measure(d, "GPU", font_label)[0] + 6
+            + self.measure(d, gpu_val_str, font_val_bold)[0] + 6
+            + self.measure(d, gpu_temp_str, font_sub)[0]
+        )
+        gpu_r2_w = 44 + 6 + self.measure(d, vram_str, font_sub)[0]
+        gpu_w = max(gpu_r1_w, gpu_r2_w, 76)
+
+        # 3. 计算 RAM 宽度（Row 1: RAM + 百分比; Row 2: 进度条 + 内存具体使用量，舒展不挤占）
+        ram_r1_w = (
+            self.measure(d, "RAM", font_label)[0] + 6
+            + self.measure(d, ram_val_str, font_val_bold)[0]
+        )
+        ram_r2_w = 44 + 6 + self.measure(d, ram_mem_str, font_sub)[0]
+        ram_w = max(ram_r1_w, ram_r2_w, 88)
+
+        # 4. 计算 网速 宽度
+        net_r1_w = self.measure(d, "↓ ", font_arrow)[0] + self.measure(d, down_str, font_val_reg)[0]
+        net_r2_w = self.measure(d, "↑ ", font_arrow)[0] + self.measure(d, up_str, font_val_reg)[0]
+        net_w = max(net_r1_w, net_r2_w, 76)
+
+        # 5. 计算 FPS 宽度（若有）
+        fps_w = 0
+        if fps is not None:
+            fps_r1_w = self.measure(d, "FPS", font_label)[0]
+            fps_r2_w = self.measure(d, str(fps), font_val_bold)[0]
+            fps_w = max(fps_r1_w, fps_r2_w, 28)
+
+        sections = [
+            ("cpu", cpu_w),
+            ("gpu", gpu_w),
+            ("ram", ram_w),
+            ("net", net_w),
+        ]
+        if fps is not None:
+            sections.append(("fps", fps_w))
+
+        pad_x = 12
+        spacing = 18
+        total_w = pad_x * 2 + sum(w for _, w in sections) + spacing * (len(sections) - 1)
+
+        img = Image.new("RGBA", (total_w, target_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # 绘制浅色半透明圆角底板与细边框
+        draw.rounded_rectangle(
+            [0, 0, total_w - 1, target_height - 1],
+            radius=7,
+            fill=self.bg_color,
+            outline=self.border_color,
+            width=1,
+        )
+
+        y1 = 2 if target_height <= 36 else 3
+        y2 = 18 if target_height <= 36 else 20
+        bar_h = 4
+        bar_y = y2 + 3
+
+        cur_x = pad_x
+        for idx, (sec_type, sec_w) in enumerate(sections):
+            if idx > 0:
+                div_x = cur_x - spacing // 2
+                draw.line([(div_x, 5), (div_x, target_height - 5)], fill=self.divider_color, width=1)
+
+            if sec_type == "cpu":
+                x = cur_x
+                draw.text((x, y1), "CPU", fill=self.fg_label, font=font_label)
+                x += self.measure(d, "CPU", font_label)[0] + 6
+                draw.text((x, y1), cpu_val_str, fill=self.fg_primary, font=font_val_bold)
+                x += self.measure(d, cpu_val_str, font_val_bold)[0] + 6
+                temp_color = self.alert_color if (cpu_temp and cpu_temp >= 85) else (
+                    self.warning_color if (cpu_temp and cpu_temp >= 75) else self.fg_muted
+                )
+                draw.text((x, y1 + 1), cpu_temp_str, fill=temp_color, font=font_sub)
+
+                # CPU 进度条
+                bx, by, bw, bh = cur_x, bar_y, sec_w, bar_h
+                draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=2, fill=self.bar_track_color)
+                fill_w = max(2, int(bw * (min(100.0, max(0.0, cpu_pct)) / 100.0))) if cpu_pct > 0 else 0
+                if fill_w > 0:
+                    draw.rounded_rectangle(
+                        [bx, by, bx + fill_w, by + bh],
+                        radius=2,
+                        fill=self.get_metric_color(cpu_pct, self.cpu_normal_color),
+                    )
+
+            elif sec_type == "gpu":
+                x = cur_x
+                draw.text((x, y1), "GPU", fill=self.fg_label, font=font_label)
+                x += self.measure(d, "GPU", font_label)[0] + 6
+                gpu_color = self.fg_primary if gpu_data else "#8c92a4"
+                draw.text((x, y1), gpu_val_str, fill=gpu_color, font=font_val_bold)
+                x += self.measure(d, gpu_val_str, font_val_bold)[0] + 6
+                gpu_temp_color = (
+                    self.alert_color if (gpu_data and gpu_data["temp"] >= 85) else (
+                        self.warning_color if (gpu_data and gpu_data["temp"] >= 75) else (
+                            self.fg_muted if gpu_data else "#8c92a4"
+                        )
+                    )
+                )
+                draw.text((x, y1 + 1), gpu_temp_str, fill=gpu_temp_color, font=font_sub)
+
+                # GPU 进度条 + 显存信息
+                bx, by, bw, bh = cur_x, bar_y, 44, bar_h
+                draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=2, fill=self.bar_track_color)
+                fill_w = max(2, int(bw * (min(100.0, max(0.0, gpu_pct_val)) / 100.0))) if gpu_pct_val > 0 else 0
+                if fill_w > 0:
+                    draw.rounded_rectangle(
+                        [bx, by, bx + fill_w, by + bh],
+                        radius=2,
+                        fill=self.get_metric_color(gpu_data["util"], self.gpu_normal_color),
+                    )
+                tx = bx + bw + 6
+                vram_color = self.fg_muted if gpu_data else "#8c92a4"
+                draw.text((tx, y2), vram_str, fill=vram_color, font=font_sub)
+
+            elif sec_type == "ram":
+                x = cur_x
+                draw.text((x, y1), "RAM", fill=self.fg_label, font=font_label)
+                x += self.measure(d, "RAM", font_label)[0] + 6
+                draw.text((x, y1), ram_val_str, fill=self.fg_primary, font=font_val_bold)
+
+                # RAM 进度条 + 内存使用详情（并排舒展显示）
+                bx, by, bw, bh = cur_x, bar_y, 44, bar_h
+                draw.rounded_rectangle([bx, by, bx + bw, by + bh], radius=2, fill=self.bar_track_color)
+                fill_w = max(2, int(bw * (min(100.0, max(0.0, ram_pct)) / 100.0))) if ram_pct > 0 else 0
+                if fill_w > 0:
+                    draw.rounded_rectangle(
+                        [bx, by, bx + fill_w, by + bh],
+                        radius=2,
+                        fill=self.get_metric_color(ram_pct, self.ram_normal_color),
+                    )
+                tx = bx + bw + 6
+                draw.text((tx, y2), ram_mem_str, fill="#555a6a", font=font_sub)
+
+            elif sec_type == "net":
+                x = cur_x
+                draw.text((x, y1 - 1), "↓", fill=self.net_down_color, font=font_arrow)
+                x += self.measure(d, "↓ ", font_arrow)[0]
+                draw.text((x, y1), down_str, fill=self.fg_primary, font=font_val_reg)
+
+                x2 = cur_x
+                draw.text((x2, y2 - 1), "↑", fill=self.net_up_color, font=font_arrow)
+                x2 += self.measure(d, "↑ ", font_arrow)[0]
+                draw.text((x2, y2), up_str, fill=self.fg_primary, font=font_val_reg)
+
+            elif sec_type == "fps":
+                draw.text((cur_x, y1), "FPS", fill=self.fg_label, font=font_label)
+                draw.text((cur_x, y2), str(fps), fill=self.fps_color, font=font_val_bold)
+
+            cur_x += sec_w + spacing
+
+        return img, total_w, target_height
+
+    @staticmethod
+    def fmt_speed_clean(bps: float) -> str:
+        bps = float(bps)
+        if bps < 1024.0:
+            return "%.0f B/s" % bps
+        if bps < 1024.0 ** 2:
+            return "%.1f KB/s" % (bps / 1024.0)
+        if bps < 1024.0 ** 3:
+            return "%.1f MB/s" % (bps / 1024.0 ** 2)
+        return "%.1f GB/s" % (bps / 1024.0 ** 3)
+
+
 # ---------------------------------------------------------------------------
 # 图形界面（贴任务栏）
 # ---------------------------------------------------------------------------
@@ -563,15 +862,16 @@ def run_gui():
     }
 
     cmd_q = queue.Queue()
+    renderer = DashboardRenderer(bg_color=BG, fg_primary=FG)
 
     # ---- 贴片窗口 ----
     root = tk.Tk()
     root.overrideredirect(True)
     root.attributes("-topmost", True)
-    root.attributes("-alpha", 0.88)
+    root.attributes("-alpha", 0.92)
     root.configure(bg=BG)
 
-    label = tk.Label(root, text="", font=(FONT, FONT_SIZE), fg=FG, bg=BG, anchor="center")
+    label = tk.Label(root, bg=BG, bd=0, highlightthickness=0)
     label.pack(fill="both", expand=True)
 
     root.update_idletasks()
@@ -643,27 +943,36 @@ def run_gui():
             cpu_temp_reader.request()
         cpu_temp = cpu_temp_reader.get()
 
-        # 组装文本：CPU → GPU → RAM → 网速 → FPS
-        cpu_txt = "--" if cpu_temp is None else "%.0f°" % cpu_temp
-        parts = [
-            "CPU %2.0f%% %s" % (cpu_pct, cpu_txt),
-        ]
-        if g:
-            parts.append("GPU %2d%% %s/%s %d°" % (
-                g["util"], fmt_gb(g["vram_used"]), fmt_gb(g["vram_total"]), g["temp"]))
-        parts.append("RAM %2.0f%% %s/%s" % (vm.percent, fmt_gb(vm.used), fmt_gb(vm.total)))
-        parts.append("↓%s ↑%s" % (fmt_rate_short(state["net_down"]), fmt_rate_short(state["net_up"])))
-        fps = fps_reader.get()
-        if fps is not None:
-            parts.append("FPS %d" % fps)
-        text = "   ".join(parts)
+        # 计算任务栏高度以适配渲染
+        rects = get_taskbar_rects()
+        target_h = 34
+        if rects is not None:
+            tbr, nr = rects
+            tb_h = tbr.bottom - tbr.top
+            target_h = max(26, min(tb_h - 2 * VPAD, 46))
 
-        label.config(text=text)
+        fps = fps_reader.get() if fps_reader else None
+
+        # 渲染双行紧凑彩色仪表板
+        img, w, h = renderer.render(
+            cpu_pct=cpu_pct,
+            cpu_temp=cpu_temp,
+            gpu_data=g,
+            ram_pct=vm.percent,
+            ram_used_bytes=vm.used,
+            ram_total_bytes=vm.total,
+            net_down=state["net_down"],
+            net_up=state["net_up"],
+            fps=fps,
+            target_height=target_h,
+        )
+        photo = ImageTk.PhotoImage(img)
+        label.config(image=photo)
+        label.image = photo
         root.update_idletasks()
 
         # 定位到任务栏
         try:
-            rects = get_taskbar_rects()
             if rects is None:
                 user32.ShowWindow(hwnd, SW_HIDE)
             else:
@@ -671,9 +980,8 @@ def run_gui():
                 if not taskbar_visible(tbr):
                     user32.ShowWindow(hwnd, SW_HIDE)
                 else:
-                    w = label.winfo_reqwidth() + 2 * HPAD
-                    x, y, w, h = overlay_geometry(tbr, nr, w, label.winfo_reqheight())
-                    user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
+                    x, y, final_w, final_h = overlay_geometry(tbr, nr, w, h)
+                    user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, final_w, final_h,
                                         SWP_NOACTIVATE | SWP_SHOWWINDOW)
         except Exception as e:
             log("positioning failed:", e)
