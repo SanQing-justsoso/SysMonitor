@@ -660,11 +660,13 @@ class DashboardRenderer:
             gpu_temp_str = "%d°" % gpu_data["temp"]
             vram_str = "%s / %s" % (fmt_gb(gpu_data["vram_used"]), fmt_gb(gpu_data["vram_total"]))
             gpu_pct_val = float(gpu_data["util"])
+            vram_pct_val = (gpu_data["vram_used"] / gpu_data["vram_total"] * 100.0) if gpu_data["vram_total"] > 0 else 0.0
         else:
             gpu_val_str = "--"
             gpu_temp_str = "--"
             vram_str = "-- / --"
             gpu_pct_val = 0.0
+            vram_pct_val = 0.0
 
         ram_val_str = "%2.0f%%" % ram_pct
         ram_mem_str = "%s / %s" % (fmt_gb(ram_used_bytes), fmt_gb(ram_total_bytes))
@@ -766,14 +768,10 @@ class DashboardRenderer:
 
                 # CPU 进度条
                 bx, by, bw, bh = cur_x, bar_y, sec_w, bar_h
-                draw.rounded_rectangle(self._safe_rect(bx, by, bx + bw, by + bh), radius=2, fill=self.bar_track_color)
-                fill_w = int(min(bw, max(2, int(bw * (min(100.0, max(0.0, cpu_pct)) / 100.0))))) if cpu_pct > 0 else 0
+                draw.rectangle(self._safe_rect(bx, by, bx + bw, by + bh), fill=self.bar_track_color)
+                fill_w = int(min(bw, max(6, int(bw * (min(100.0, max(0.0, cpu_pct)) / 100.0))))) if cpu_pct > 0 else 0
                 if fill_w > 0:
-                    draw.rounded_rectangle(
-                        self._safe_rect(bx, by, bx + fill_w, by + bh),
-                        radius=2,
-                        fill=self.get_metric_color(cpu_pct, self.cpu_normal_color),
-                    )
+                    draw.rectangle(self._safe_rect(bx, by, bx + fill_w, by + bh), fill=self.get_metric_color(cpu_pct, self.cpu_normal_color))
 
             elif sec_type == "gpu":
                 x = cur_x
@@ -793,14 +791,10 @@ class DashboardRenderer:
 
                 # GPU 进度条 + 显存信息
                 bx, by, bw, bh = cur_x, bar_y, max(2, int(44 * s)), bar_h
-                draw.rounded_rectangle(self._safe_rect(bx, by, bx + bw, by + bh), radius=2, fill=self.bar_track_color)
-                fill_w = int(min(bw, max(2, int(bw * (min(100.0, max(0.0, gpu_pct_val)) / 100.0))))) if gpu_pct_val > 0 else 0
+                draw.rectangle(self._safe_rect(bx, by, bx + bw, by + bh), fill=self.bar_track_color)
+                fill_w = int(min(bw, max(6, int(bw * (min(100.0, max(0.0, vram_pct_val)) / 100.0))))) if vram_pct_val > 0 else 0
                 if fill_w > 0:
-                    draw.rounded_rectangle(
-                        self._safe_rect(bx, by, bx + fill_w, by + bh),
-                        radius=2,
-                        fill=self.get_metric_color(gpu_pct_val, self.gpu_normal_color),
-                    )
+                    draw.rectangle(self._safe_rect(bx, by, bx + fill_w, by + bh), fill=self.get_metric_color(vram_pct_val, self.gpu_normal_color))
                 tx = bx + bw + int(6 * s)
                 vram_color = self.fg_muted if gpu_data else "#8c92a4"
                 draw.text((tx, y2), vram_str, fill=vram_color, font=font_sub)
@@ -813,14 +807,10 @@ class DashboardRenderer:
 
                 # RAM 进度条 + 内存使用详情（并排舒展显示）
                 bx, by, bw, bh = cur_x, bar_y, max(2, int(44 * s)), bar_h
-                draw.rounded_rectangle(self._safe_rect(bx, by, bx + bw, by + bh), radius=2, fill=self.bar_track_color)
-                fill_w = int(min(bw, max(2, int(bw * (min(100.0, max(0.0, ram_pct)) / 100.0))))) if ram_pct > 0 else 0
+                draw.rectangle(self._safe_rect(bx, by, bx + bw, by + bh), fill=self.bar_track_color)
+                fill_w = int(min(bw, max(6, int(bw * (min(100.0, max(0.0, ram_pct)) / 100.0))))) if ram_pct > 0 else 0
                 if fill_w > 0:
-                    draw.rounded_rectangle(
-                        self._safe_rect(bx, by, bx + fill_w, by + bh),
-                        radius=2,
-                        fill=self.get_metric_color(ram_pct, self.ram_normal_color),
-                    )
+                    draw.rectangle(self._safe_rect(bx, by, bx + fill_w, by + bh), fill=self.get_metric_color(ram_pct, self.ram_normal_color))
                 tx = bx + bw + int(6 * s)
                 draw.text((tx, y2), ram_mem_str, fill="#555a6a", font=font_sub)
 
@@ -916,7 +906,7 @@ def run_gui():
         "scale": float(config["scale"]),
         "locked": bool(config["locked"]),
         "drag_x": 0, "drag_y": 0,  # 拖动起始偏移
-        "wx": config["x"], "wy": config["y"],  # 窗口位置
+        "wx": config.get("x", 0), "wy": config.get("y", 0),  # 窗口位置
     }
 
     cmd_q = queue.Queue()
@@ -1123,7 +1113,7 @@ def run_gui():
         except Exception as e:
             log("render failed:", e)
 
-        # 浮窗定位
+        # 浮窗定位：从配置文件读取位置
         try:
             if 'w' not in dir() and 'h' not in dir():
                 root.after(REFRESH_MS, refresh)
@@ -1136,7 +1126,10 @@ def run_gui():
                 user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
                                     SWP_NOACTIVATE | SWP_SHOWWINDOW)
             else:
-                # 解锁模式：用上次保存的位置，首次用右下角
+                # 解锁模式：用配置文件保存的位置
+                if state["wx"] == 0 and state["wy"] == 0:
+                    state["wx"] = config.get("x", 0)
+                    state["wy"] = config.get("y", 0)
                 if state["wx"] == 0 and state["wy"] == 0:
                     sw = user32.GetSystemMetrics(0)
                     sh = user32.GetSystemMetrics(1)
@@ -1167,15 +1160,15 @@ def run_gui():
                     config["locked"] = state["locked"]
                     save_config(config)
                     if state["locked"]:
-                        # 锁定：加点击穿透 + 粘右下角
+                        # 锁定：加点击穿透
                         ex = _GetWindowLongPtr(hwnd, GWL_EXSTYLE)
                         _SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT)
-                        # 强制回到右下角
-                        user32.ShowWindow(hwnd, SWP_SHOWWINDOW)
                     else:
-                        # 解锁：去掉点击穿透，可拖动
+                        # 解锁：去掉点击穿透，恢复保存的位置
                         ex = _GetWindowLongPtr(hwnd, GWL_EXSTYLE)
                         _SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex & ~WS_EX_TRANSPARENT)
+                        if state["wx"] != 0 or state["wy"] != 0:
+                            root.geometry("+%d+%d" % (state["wx"], state["wy"]))
         except queue.Empty:
             pass
         root.after(120, poll_cmd)
