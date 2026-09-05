@@ -1113,30 +1113,25 @@ def run_gui():
         except Exception as e:
             log("render failed:", e)
 
-        # 浮窗定位：从配置文件读取位置
+        # 浮窗定位：统一从配置文件读取位置
         try:
             if 'w' not in dir() and 'h' not in dir():
                 root.after(REFRESH_MS, refresh)
                 return
-            if state["locked"]:
+            # 首次运行用右下角，否则用配置的位置
+            if state["wx"] == 0 and state["wy"] == 0:
+                state["wx"] = config.get("x", 0)
+                state["wy"] = config.get("y", 0)
+            if state["wx"] == 0 and state["wy"] == 0:
                 sw = user32.GetSystemMetrics(0)
                 sh = user32.GetSystemMetrics(1)
-                x = sw - w - 20
-                y = sh - h - 80
-                user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
-                                    SWP_NOACTIVATE | SWP_SHOWWINDOW)
-            else:
-                # 解锁模式：用配置文件保存的位置
-                if state["wx"] == 0 and state["wy"] == 0:
-                    state["wx"] = config.get("x", 0)
-                    state["wy"] = config.get("y", 0)
-                if state["wx"] == 0 and state["wy"] == 0:
-                    sw = user32.GetSystemMetrics(0)
-                    sh = user32.GetSystemMetrics(1)
-                    state["wx"] = sw - w - 20
-                    state["wy"] = sh - h - 80
-                user32.SetWindowPos(hwnd, HWND_TOPMOST, state["wx"], state["wy"], w, h,
-                                    SWP_NOACTIVATE | SWP_SHOWWINDOW)
+                state["wx"] = sw - w - 20
+                state["wy"] = sh - h - 80
+                config["x"] = state["wx"]
+                config["y"] = state["wy"]
+                save_config(config)
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, state["wx"], state["wy"], w, h,
+                                SWP_NOACTIVATE | SWP_SHOWWINDOW)
         except Exception as e:
             log("positioning failed:", e)
 
