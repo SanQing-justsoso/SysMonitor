@@ -61,7 +61,7 @@ else:
 
 LHM_EXE = os.path.join(LHM_DIR, "lhm_dump.exe")
 
-REFRESH_MS = 200           # 刷新间隔（毫秒）- 快速恢复防止被遮挡
+REFRESH_MS = 1000          # 刷新间隔（毫秒）
 CPU_TEMP_EVERY = 4         # CPU 温度每隔 N 个 tick 读一次
 
 BG = "#e8e8f0"             # 贴片背景色（浅色）
@@ -460,7 +460,6 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 SW_HIDE = 0
-SW_SHOW = 5
 
 user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = wintypes.HWND
@@ -868,11 +867,11 @@ def run_gui():
     root.configure(bg=BG)
 
     label = tk.Label(root, bg=BG, bd=0, highlightthickness=0)
-    label.pack(fill="both", expand=True)
+    label.pack()  # 不 expand，窗口尺寸由 SetWindowPos 控制
 
     root.update_idletasks()
     hwnd = get_toplevel_hwnd(root.winfo_id())
-    apply_clickthrough(hwnd)
+    # 浮窗模式：不设置点击穿透，保留 WS_EX_TOPMOST
 
     # ---- 托盘图标（退出/显示隐藏入口，因为贴片本身点击穿透）----
     def make_icon_img():
@@ -939,13 +938,8 @@ def run_gui():
             cpu_temp_reader.request()
         cpu_temp = cpu_temp_reader.get()
 
-        # 计算任务栏高度以适配渲染
-        rects = get_taskbar_rects()
-        target_h = 34
-        if rects is not None:
-            tbr, nr = rects
-            tb_h = tbr.bottom - tbr.top
-            target_h = max(26, min(tb_h - 2 * VPAD, 46))
+        # 浮窗模式：固定渲染高度
+        target_h = 42
 
         fps = fps_reader.get() if fps_reader else None
 
@@ -967,20 +961,15 @@ def run_gui():
         label.image = photo
         root.update_idletasks()
 
-        # 定位到任务栏
+        # 浮窗定位：屏幕右下角
         try:
-            if rects is None:
-                # 获取不到任务栏矩形时跳过本次定位，避免误隐藏
-                pass
-            else:
-                tbr, nr = rects
-                if not taskbar_visible(tbr):
-                    user32.ShowWindow(hwnd, SW_HIDE)
-                else:
-                    x, y, final_w, final_h = overlay_geometry(tbr, nr, w, h)
-                    user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, final_w, final_h,
-                                        SWP_NOACTIVATE | SWP_SHOWWINDOW)
-                    user32.ShowWindow(hwnd, SW_SHOW)
+            sw = user32.GetSystemMetrics(0)  # 屏幕宽度
+            sh = user32.GetSystemMetrics(1)  # 屏幕高度
+            x = sw - w - 20  # 右下角，留 20px 边距
+            y = sh - h - 80  # 任务栏上方约 80px
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
+                                SWP_NOACTIVATE | SWP_SHOWWINDOW)
+            root.geometry("%dx%d+%d+%d" % (w, h, x, y))
         except Exception as e:
             log("positioning failed:", e)
 
