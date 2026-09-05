@@ -974,7 +974,8 @@ def run_gui():
         # 定位到任务栏
         try:
             if rects is None:
-                user32.ShowWindow(hwnd, SW_HIDE)
+                # 获取不到任务栏矩形时跳过本次定位，避免误隐藏
+                pass
             else:
                 tbr, nr = rects
                 if not taskbar_visible(tbr):
