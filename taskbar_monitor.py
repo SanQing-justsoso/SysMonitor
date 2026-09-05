@@ -460,6 +460,7 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 SW_HIDE = 0
+SW_SHOW = 5
 
 user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = wintypes.HWND
@@ -984,6 +985,8 @@ def run_gui():
                     x, y, final_w, final_h = overlay_geometry(tbr, nr, w, h)
                     user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, final_w, final_h,
                                         SWP_NOACTIVATE | SWP_SHOWWINDOW)
+                    # 确保窗口始终可见（防止被任务栏遮挡）
+                    user32.ShowWindow(hwnd, SW_SHOW)
         except Exception as e:
             log("positioning failed:", e)
 
