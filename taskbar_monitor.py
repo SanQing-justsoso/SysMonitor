@@ -21,6 +21,7 @@ import os
 import sys
 import json
 import time
+import csv
 import collections
 import threading
 import queue
@@ -28,6 +29,7 @@ import ctypes
 import subprocess
 import traceback
 from ctypes import wintypes
+from typing import Callable, Optional, Sequence, Tuple
 
 import psutil
 
@@ -87,6 +89,45 @@ def log_exc(tag="CRASH"):
         pass
 
 
+def close_quietly(callback: Optional[Callable[[], object]]) -> None:
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:
+        pass
+
+
+class SingleInstance:
+    """Own a named Windows mutex so only one monitor can run at a time."""
+
+    ERROR_ALREADY_EXISTS = 183
+
+    def __init__(self, name: str = "Local\\SysMonitor") -> None:
+        self.name = name
+        self.handle = None
+        self.kernel32 = ctypes.windll.kernel32
+        self.kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        self.kernel32.CreateMutexW.restype = wintypes.HANDLE
+        self.kernel32.GetLastError.restype = wintypes.DWORD
+        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def acquire(self) -> bool:
+        self.handle = self.kernel32.CreateMutexW(None, True, self.name)
+        if not self.handle:
+            return False
+        if self.kernel32.GetLastError() == self.ERROR_ALREADY_EXISTS:
+            self.release()
+            return False
+        return True
+
+    def release(self) -> None:
+        if self.handle:
+            self.kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
@@ -136,6 +177,40 @@ def safe_int(v, default=0):
 # ---------------------------------------------------------------------------
 # 数据采集器
 # ---------------------------------------------------------------------------
+class CpuTempReader:
+    """Read CPU temperature off the Tk event thread."""
+
+    def __init__(self) -> None:
+        self._value = None
+        self._lock = threading.Lock()
+        self._request = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="cpu-temp", daemon=True)
+        self._thread.start()
+        self.request()
+
+    def request(self) -> None:
+        self._request.set()
+
+    def get(self) -> Optional[float]:
+        with self._lock:
+            return self._value
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._request.wait()
+            self._request.clear()
+            if self._stop.is_set():
+                break
+            value = read_cpu_temp()
+            with self._lock:
+                self._value = value
+
+    def close(self) -> None:
+        self._stop.set()
+        self._request.set()
+
+
 class GpuReader:
     """通过 NVML 读 GPU 温度 / 显存 / 利用率。"""
 
@@ -193,6 +268,17 @@ def read_cpu_temp():
         return None
 
 
+def network_rates(
+    previous: Sequence[int], current: Sequence[int], elapsed: float
+) -> Tuple[float, float]:
+    """Return non-negative receive/send rates from cumulative counters."""
+    if elapsed <= 0:
+        return 0.0, 0.0
+    recv_delta = current[0] - previous[0]
+    sent_delta = current[1] - previous[1]
+    return max(0.0, recv_delta / elapsed), max(0.0, sent_delta / elapsed)
+
+
 class FpsReader:
     """通过 PresentMon 读取当前主进程（游戏）的 FPS。"""
 
@@ -229,26 +315,36 @@ class FpsReader:
         except Exception as e:
             log("FPS init failed:", e)
 
+    def _parse_parts(self, parts: Sequence[str]) -> Optional[str]:
+        if self.header is None:
+            self.header = parts
+            self.app_idx = parts.index("Application") if "Application" in parts else 0
+            return None
+        if len(parts) <= self.app_idx:
+            return None
+        return parts[self.app_idx]
+
+    def _parse_line(self, line):
+        return self._parse_parts(next(csv.reader([line])))
+
+    @staticmethod
+    def _prune(dq, now):
+        while dq and now - dq[0] > 1.0:
+            dq.popleft()
+
     def _reader(self):
         try:
-            for line in self.proc.stdout:
-                line = line.strip()
-                if not line:
+            for parts in csv.reader(self.proc.stdout):
+                if not parts:
                     continue
-                parts = line.split(",")
-                if self.header is None:
-                    self.header = parts
-                    self.app_idx = parts.index("Application") if "Application" in parts else 0
+                app = self._parse_parts(parts)
+                if not app:
                     continue
-                if len(parts) <= self.app_idx:
-                    continue
-                app = parts[self.app_idx]
                 now = time.time()
                 with self.lock:
                     dq = self.frames[app]
                     dq.append(now)
-                    while dq and now - dq[0] > 1.0:
-                        dq.popleft()
+                    self._prune(dq, now)
         except Exception:
             pass
 
@@ -257,14 +353,17 @@ class FpsReader:
         now = time.time()
         with self.lock:
             best = 0
+            expired = []
             for app, dq in self.frames.items():
-                while dq and now - dq[0] > 1.0:
-                    dq.popleft()
+                self._prune(dq, now)
+                if not dq:
+                    expired.append(app)
+                    continue
                 if app in self.BLOCKLIST:
                     continue
-                n = len(dq)
-                if n > best:
-                    best = n
+                best = max(best, len(dq))
+            for app in expired:
+                self.frames.pop(app, None)
             return best if best >= 10 else None
 
     def close(self):
@@ -289,6 +388,11 @@ def selftest():
     net2 = psutil.net_io_counters()
     t2 = time.time()
     dt = t2 - t1
+    net_down, net_up = network_rates(
+        (net1.bytes_recv, net1.bytes_sent),
+        (net2.bytes_recv, net2.bytes_sent),
+        dt,
+    )
 
     cpu_pct = psutil.cpu_percent(None)
     vm = psutil.virtual_memory()
@@ -306,13 +410,40 @@ def selftest():
     else:
         print("GPU             : unavailable")
     print("CPU temp        : %s C" % ("--" if cput is None else "%.0f" % cput))
-    print("Net down        : %s" % fmt_speed((net2.bytes_recv - net1.bytes_recv) / dt))
-    print("Net up          : %s" % fmt_speed((net2.bytes_sent - net1.bytes_sent) / dt))
+    print("Net down        : %s" % fmt_speed(net_down))
+    print("Net up          : %s" % fmt_speed(net_up))
 
 
 # ---------------------------------------------------------------------------
 # win32 辅助：定位任务栏、设置窗口样式
 # ---------------------------------------------------------------------------
+
+def rect(left, top, right, bottom):
+    """Create a Win32 rectangle for geometry tests and layout helpers."""
+    value = wintypes.RECT()
+    value.left, value.top = left, top
+    value.right, value.bottom = right, bottom
+    return value
+
+
+def overlay_geometry(tbr, nr, requested_width, requested_height):
+    """Return a taskbar-safe overlay rectangle in screen coordinates."""
+    taskbar_width = tbr.right - tbr.left
+    taskbar_height = tbr.bottom - tbr.top
+    if taskbar_width >= taskbar_height:
+        available_width = nr.left - tbr.left - 2 * LEFT_MARGIN
+        width = max(16, min(requested_width, available_width))
+        height = max(16, taskbar_height - 2 * VPAD)
+        x = tbr.left + LEFT_MARGIN
+        y = tbr.top + VPAD
+    else:
+        width = max(16, taskbar_width - 2 * VPAD)
+        height = min(requested_height, max(16, taskbar_height - 2 * VPAD))
+        x = tbr.left + VPAD
+        y = tbr.top + VPAD
+    return x, y, width, height
+
+
 user32 = ctypes.windll.user32
 
 GWL_EXSTYLE = -20
@@ -332,6 +463,8 @@ user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = wintypes.HWND
 user32.FindWindowExW.argtypes = [wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowExW.restype = wintypes.HWND
+user32.GetParent.argtypes = [wintypes.HWND]
+user32.GetParent.restype = wintypes.HWND
 user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetWindowRect.restype = wintypes.BOOL
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
@@ -416,14 +549,14 @@ def run_gui():
         FROZEN, LHM_EXE, os.path.exists(LHM_EXE), PM_EXE, os.path.exists(PM_EXE)))
 
     gpu = GpuReader()
-    fps_reader = FpsReader()
+    fps_reader = None
+    cpu_temp_reader = None
     psutil.cpu_percent(None)
 
     net_last = psutil.net_io_counters()
     net_last_t = time.time()
 
     state = {
-        "cpu_temp": None,
         "net_down": 0.0,
         "net_up": 0.0,
         "manual_hidden": False,
@@ -496,18 +629,22 @@ def run_gui():
         now = time.time()
         dt = now - net_last_t
         if dt > 0:
-            state["net_down"] = (net_now.bytes_recv - net_last.bytes_recv) / dt
-            state["net_up"] = (net_now.bytes_sent - net_last.bytes_sent) / dt
+            state["net_down"], state["net_up"] = network_rates(
+                (net_last.bytes_recv, net_last.bytes_sent),
+                (net_now.bytes_recv, net_now.bytes_sent),
+                dt,
+            )
         net_last = net_now
         net_last_t = now
 
         g = gpu.read()
 
-        if tick % CPU_TEMP_EVERY == 1 or state["cpu_temp"] is None:
-            state["cpu_temp"] = read_cpu_temp()
+        if tick % CPU_TEMP_EVERY == 1:
+            cpu_temp_reader.request()
+        cpu_temp = cpu_temp_reader.get()
 
-        # 组装文本：CPU → GPU → RAM → 网速
-        cpu_txt = "--" if state["cpu_temp"] is None else "%.0f°" % state["cpu_temp"]
+        # 组装文本：CPU → GPU → RAM → 网速 → FPS
+        cpu_txt = "--" if cpu_temp is None else "%.0f°" % cpu_temp
         parts = [
             "CPU %2.0f%% %s" % (cpu_pct, cpu_txt),
         ]
@@ -516,6 +653,9 @@ def run_gui():
                 g["util"], fmt_gb(g["vram_used"]), fmt_gb(g["vram_total"]), g["temp"]))
         parts.append("RAM %2.0f%% %s/%s" % (vm.percent, fmt_gb(vm.used), fmt_gb(vm.total)))
         parts.append("↓%s ↑%s" % (fmt_rate_short(state["net_down"]), fmt_rate_short(state["net_up"])))
+        fps = fps_reader.get()
+        if fps is not None:
+            parts.append("FPS %d" % fps)
         text = "   ".join(parts)
 
         label.config(text=text)
@@ -532,9 +672,7 @@ def run_gui():
                     user32.ShowWindow(hwnd, SW_HIDE)
                 else:
                     w = label.winfo_reqwidth() + 2 * HPAD
-                    h = max(16, (tbr.bottom - tbr.top) - 2 * VPAD)
-                    x = tbr.left + LEFT_MARGIN
-                    y = tbr.top + VPAD
+                    x, y, w, h = overlay_geometry(tbr, nr, w, label.winfo_reqheight())
                     user32.SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h,
                                         SWP_NOACTIVATE | SWP_SHOWWINDOW)
         except Exception as e:
@@ -560,22 +698,19 @@ def run_gui():
         root.after(120, poll_cmd)
 
     # 启动
-    tray_icon.run_detached()
-    root.after(100, refresh)
-    root.after(120, poll_cmd)
     try:
+        fps_reader = FpsReader()
+        cpu_temp_reader = CpuTempReader()
+        tray_icon.run_detached()
+        root.after(100, refresh)
+        root.after(120, poll_cmd)
         root.mainloop()
     except Exception:
         log_exc("GUI")
     finally:
-        try:
-            tray_icon.stop()
-        except Exception:
-            pass
-        try:
-            fps_reader.close()
-        except Exception:
-            pass
+        close_quietly(getattr(tray_icon, "stop", None))
+        close_quietly(getattr(fps_reader, "close", None))
+        close_quietly(getattr(cpu_temp_reader, "close", None))
 
 
 def main():
@@ -586,11 +721,18 @@ def main():
             log_exc("selftest")
             raise
         return
+
+    instance = SingleInstance()
+    if not instance.acquire():
+        log("another SysMonitor instance is already running")
+        return
     try:
         run_gui()
     except Exception:
         log_exc("main")
         raise
+    finally:
+        instance.release()
 
 
 if __name__ == "__main__":

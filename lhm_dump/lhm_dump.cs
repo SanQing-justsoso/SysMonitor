@@ -5,9 +5,12 @@ using LibreHardwareMonitor.Hardware;
 
 public class UpdateVisitor : IVisitor
 {
+    public readonly List<IHardware> Hardware = new List<IHardware>();
+
     public void VisitComputer(IComputer computer) { computer.Traverse(this); }
     public void VisitHardware(IHardware hardware)
     {
+        Hardware.Add(hardware);
         hardware.Update();
         foreach (var sh in hardware.SubHardware) sh.Accept(this);
     }
@@ -17,7 +20,14 @@ public class UpdateVisitor : IVisitor
 
 public class Program
 {
-    static string J(string s) { return s.Replace("\\", "\\\\").Replace("\"", "\\\""); }
+    static string J(string s)
+    {
+        return s.Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n")
+                .Replace("\t", "\\t");
+    }
 
     static void Emit(IHardware h, List<string> items)
     {
@@ -42,17 +52,20 @@ public class Program
             IsMemoryEnabled = true,
             IsMotherboardEnabled = true,
         };
-        computer.Open();
-        computer.Accept(new UpdateVisitor());
-
-        var items = new List<string>();
-        foreach (var hw in computer.Hardware)
+        try
         {
-            Emit(hw, items);
-            foreach (var sh in hw.SubHardware) Emit(sh, items);
-        }
+            computer.Open();
+            var visitor = new UpdateVisitor();
+            computer.Accept(visitor);
 
-        Console.WriteLine("[" + string.Join(",", items) + "]");
-        computer.Close();
+            var items = new List<string>();
+            foreach (var hw in visitor.Hardware) Emit(hw, items);
+
+            Console.WriteLine("[" + string.Join(",", items) + "]");
+        }
+        finally
+        {
+            computer.Close();
+        }
     }
 }

@@ -11,7 +11,20 @@ powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
 exit /b
 
 :run
-schtasks /Create /TN "SysMonitor" /TR "%~dp0SysMonitor.exe" /SC ONLOGON /RL HIGHEST /F
+set "TARGET=%~dp0dist\SysMonitor.exe"
+if not exist "%TARGET%" set "TARGET=%~dp0SysMonitor.exe"
+if not exist "%TARGET%" (
+    echo [ERROR] SysMonitor.exe not found.
+    echo Build it first with: pyinstaller SysMonitor.spec
+    pause
+    exit /b 1
+)
+schtasks /Create /TN "SysMonitor" /TR "\"%TARGET%\"" /SC ONLOGON /RL HIGHEST /F
+if errorlevel 1 (
+    echo [ERROR] Failed to create scheduled task.
+    pause
+    exit /b 1
+)
 echo.
 echo ==========================================
 echo  Autostart task created successfully: SysMonitor

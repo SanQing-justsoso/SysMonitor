@@ -1,11 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+
+SPEC_DIR = os.path.dirname(os.path.abspath(__file__))
+datas = [(os.path.join(SPEC_DIR, 'LibreHardwareMonitor'), 'LibreHardwareMonitor')]
+_presentmon = os.path.join(SPEC_DIR, 'PresentMon.exe')
+if os.path.exists(_presentmon):
+    datas.append((_presentmon, '.'))
+
 
 a = Analysis(
-    ['taskbar_monitor.py'],
-    pathex=[],
+    [os.path.join(SPEC_DIR, 'taskbar_monitor.py')],
+    pathex=[SPEC_DIR],
     binaries=[],
-    datas=[('LibreHardwareMonitor', 'LibreHardwareMonitor')],
+    datas=datas,
     hiddenimports=['pystray._win32'],
     hookspath=[],
     hooksconfig={},
